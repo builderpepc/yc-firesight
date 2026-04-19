@@ -32,17 +32,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ragIndexDir = File(app.filesDir, "rag_index").apply { mkdirs() }.absolutePath,
     )
 
-    private val _status = MutableStateFlow("Ready — tap Connect Glasses to begin.")
+    private val _status = MutableStateFlow("Ready — tap Start Inspection to begin.")
     val status: StateFlow<String> = _status.asStateFlow()
 
-    private val _connectEnabled = MutableStateFlow(false)
-    val connectEnabled: StateFlow<Boolean> = _connectEnabled.asStateFlow()
+    private val _inspectionEnabled = MutableStateFlow(false)
+    val inspectionEnabled: StateFlow<Boolean> = _inspectionEnabled.asStateFlow()
 
-    private val _agentEnabled = MutableStateFlow(false)
-    val agentEnabled: StateFlow<Boolean> = _agentEnabled.asStateFlow()
-
-    private val _agentLabel = MutableStateFlow("Start Inspection")
-    val agentLabel: StateFlow<String> = _agentLabel.asStateFlow()
+    private val _inspectionLabel = MutableStateFlow("Start Inspection")
+    val inspectionLabel: StateFlow<String> = _inspectionLabel.asStateFlow()
 
     private val _forceLocal = MutableStateFlow(false)
     val forceLocal: StateFlow<Boolean> = _forceLocal.asStateFlow()
@@ -76,48 +73,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setForceLocal(enabled: Boolean) { _forceLocal.value = enabled }
 
     fun onPermissionsGranted() {
-        _status.value = "Ready — tap Connect Glasses."
-        _connectEnabled.value = true
+        _status.value = "Ready — tap Start Inspection."
+        _inspectionEnabled.value = true
     }
 
     fun onWearablePermissionDenied() {
         _status.value = "Microphone permission denied — cannot use glasses mic."
-        _connectEnabled.value = false
+        _inspectionEnabled.value = false
     }
 
     fun onStatus(msg: String) { _status.value = msg }
 
-    fun connectGlasses() {
-        viewModelScope.launch {
-            _status.value = "Connecting to glasses…"
-            _connectEnabled.value = false
+    /**
+     * Single button that gates the whole inspection lifecycle. Idle taps spin up
+     * the model + glasses connection and start the agent loop; running taps tear
+     * down audio + camera so the glasses are free between inspections.
+     */
+    fun toggleInspection() {
+        if (!agentRunning) startInspection() else stopInspection()
+    }
 
+    private fun startInspection() {
+        _inspectionEnabled.value = false
+        _inspectionLabel.value = "Starting…"
+        viewModelScope.launch {
+            _status.value = "Loading model…"
             try {
                 session.init(resolveModelPath())
             } catch (e: Throwable) {
                 _status.value = "Model load failed: ${e.message}"
-                _connectEnabled.value = true
+                _inspectionLabel.value = "Start Inspection"
+                _inspectionEnabled.value = true
+                return@launch
+            }
+            _status.value = "Connecting to glasses…"
+            val connected = session.connect()
+            if (!connected) {
+                _status.value = "Connection failed — is the device paired?"
+                _inspectionLabel.value = "Start Inspection"
+                _inspectionEnabled.value = true
                 return@launch
             }
 
-            val connected = session.connect()
-            if (connected) {
-                _status.value = "Connected. Tap Start Inspection."
-                _agentEnabled.value = true
-            } else {
-                _status.value = "Connection failed — is the device paired?"
-                _connectEnabled.value = true
-            }
-        }
-    }
-
-    fun toggleAgent() {
-        if (!agentRunning) {
             agentRunning = true
-            _agentLabel.value = "Stop Inspection"
             val usingCloud = isOnline() && !_forceLocal.value
             _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 4 E2B."
-
             session.start(
                 preferCloud = usingCloud,
                 onUtterance = {
@@ -126,8 +126,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 onTurn = { turn ->
                     viewModelScope.launch {
                         _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 4 E2B."
-                        // Silent mode: model returns an empty reply when it only logged notes.
-                        // Only speak when the user explicitly asked something.
                         if (turn.assistantReply.isNotBlank()) speak(turn.assistantReply)
                     }
                 },
@@ -136,17 +134,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 },
                 onError = { error ->
                     // Per-turn errors (bad audio, camera glitch, rate limit) shouldn't
-                    // tear down the inspection. Surface the message but keep the
-                    // agent loop + button state alive so the user can keep working
-                    // or stop manually.
+                    // tear down the inspection. Keep the loop + button state alive.
                     viewModelScope.launch { _status.value = "Error: $error" }
                 },
             )
-        } else {
+            _inspectionLabel.value = "Stop Inspection"
+            _inspectionEnabled.value = true
+        }
+    }
+
+    private fun stopInspection() {
+        _inspectionEnabled.value = false
+        _inspectionLabel.value = "Stopping…"
+        viewModelScope.launch {
+            session.endSession()
             agentRunning = false
-            _agentLabel.value = "Start Inspection"
-            _status.value = "Inspection paused."
-            session.stop()
+            _inspectionLabel.value = "Start Inspection"
+            _status.value = "Inspection ended — glasses disconnected."
+            _inspectionEnabled.value = true
         }
     }
 

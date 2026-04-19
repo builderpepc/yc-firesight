@@ -203,6 +203,14 @@ class InspectionSession(
         collectJob = null
     }
 
+    /** End the active inspection: stop audio, unroute BT SCO, close camera stream.
+     *  Keeps the loaded model + RAG index so the next session can start fast. */
+    fun endSession() {
+        stop()
+        wearableConnector.endSession()
+        camera.close()
+    }
+
     fun resetConversation() {
         agent.resetConversation()
         notes.clear()

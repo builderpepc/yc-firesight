@@ -79,8 +79,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.btnConnect.setOnClickListener { viewModel.connectGlasses() }
-        binding.btnTranscribe.setOnClickListener { viewModel.toggleAgent() }
+        binding.btnInspection.setOnClickListener { viewModel.toggleInspection() }
         binding.btnLoadFloorPlan.setOnClickListener {
             floorPlanPicker.launch(arrayOf("image/png", "image/jpeg", "image/*"))
         }
@@ -119,9 +118,8 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-                launch { viewModel.connectEnabled.collect { binding.btnConnect.isEnabled = it } }
-                launch { viewModel.agentEnabled.collect { binding.btnTranscribe.isEnabled = it } }
-                launch { viewModel.agentLabel.collect { binding.btnTranscribe.text = it } }
+                launch { viewModel.inspectionEnabled.collect { binding.btnInspection.isEnabled = it } }
+                launch { viewModel.inspectionLabel.collect { binding.btnInspection.text = it } }
                 launch { viewModel.forceLocal.collect { binding.cbLocalInference.isChecked = it } }
                 launch {
                     viewModel.docsIndexedChunks.collect { count ->

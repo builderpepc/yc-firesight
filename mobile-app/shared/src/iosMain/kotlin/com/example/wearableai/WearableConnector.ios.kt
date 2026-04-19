@@ -7,6 +7,8 @@ actual class WearableConnector {
         TODO("Implement with Meta Wearables iOS DAT SDK")
     }
 
+    actual fun endSession() {}
+
     actual fun disconnect() {}
 
     actual fun startAudioStream(onUtteranceReady: AudioChunkCallback) {

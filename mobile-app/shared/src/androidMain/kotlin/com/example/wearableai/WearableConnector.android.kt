@@ -52,7 +52,7 @@ actual class WearableConnector {
         }
     }
 
-    actual fun disconnect() {
+    actual fun endSession() {
         stopAudioStream()
         val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -62,6 +62,10 @@ actual class WearableConnector {
             audioManager.stopBluetoothSco()
             audioManager.mode = AudioManager.MODE_NORMAL
         }
+    }
+
+    actual fun disconnect() {
+        endSession()
         scope.cancel()
     }
 
