@@ -37,8 +37,12 @@ actual class VoiceInputProvider {
         true
     }
 
-    actual fun disconnect() {
+    actual fun endSession() {
         stopAudioStream()
+    }
+
+    actual fun disconnect() {
+        endSession()
         scope.cancel()
     }
 
@@ -92,7 +96,7 @@ actual class VoiceInputProvider {
                 val frame = chunk.copyOf(read)
                 val peak = frame.peakAmplitude()
                 // Adjusted threshold for phone mic which might be further from mouth than glasses
-                val isSilent = peak < 300 
+                val isSilent = peak < 300
 
                 totalFrames++
                 if (totalFrames % 100 == 0) {

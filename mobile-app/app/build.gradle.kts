@@ -4,6 +4,7 @@ import java.io.File
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.compose.compiler)
 }
 
 val envVars = mutableMapOf<String, String>()
@@ -52,6 +53,7 @@ android {
     buildFeatures {
         buildConfig = true
         viewBinding = true
+        compose = true
     }
 }
 
@@ -77,4 +79,12 @@ dependencies {
 
     // Google AI (Gemini cloud fallback)
     implementation(libs.google.ai.generativeai)
+
+    // Compose (for floor-plan pan/zoom + pins, hosted in a ComposeView)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.activity.compose)
 }

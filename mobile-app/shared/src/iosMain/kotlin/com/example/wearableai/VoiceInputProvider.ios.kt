@@ -32,8 +32,12 @@ actual class VoiceInputProvider {
     }
 
     actual fun disconnect() {
-        stopAudioStream()
+        endSession()
         scope.cancel()
+    }
+
+    actual fun endSession() {
+        stopAudioStream()
     }
 
     actual fun startAudioStream(onUtteranceReady: AudioChunkCallback) {
