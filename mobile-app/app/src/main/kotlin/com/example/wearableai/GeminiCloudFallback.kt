@@ -49,9 +49,19 @@ class GeminiCloudFallback : CloudFallback {
     ): TurnReply {
         val model = modelFor(request.systemPrompt, request.tools)
 
-        val historyContent = request.history.map { msg ->
-            val role = if (msg["role"] == "assistant") "model" else (msg["role"] ?: "user")
-            content(role = role) { text(msg["content"] ?: "") }
+        val historyContent = mutableListOf<com.google.ai.client.generativeai.type.Content>()
+        for (i in 0 until request.history.size step 2) {
+            val userMsg = request.history[i]
+            val assistantMsg = request.history.getOrNull(i + 1)
+
+            // Re-insert <heard> tags so Gemini sees the pattern it should follow
+            historyContent.add(content(role = "user") { text(userMsg["content"] ?: "") })
+            if (assistantMsg != null) {
+                val transcript = userMsg["content"] ?: ""
+                val reply = assistantMsg["content"] ?: ""
+                val combined = "<heard>$transcript</heard>\n$reply"
+                historyContent.add(content(role = "model") { text(combined) })
+            }
         }
         val chat = model.startChat(history = historyContent)
 
@@ -59,6 +69,8 @@ class GeminiCloudFallback : CloudFallback {
             request.audioFilePath?.let { path ->
                 val bytes = File(path).readBytes()
                 part(BlobPart("audio/wav", bytes))
+                // Stronger nudge helps Flash follow the transcription instruction in systemPrompt
+                part(TextPart("TRANSCRIPTION INSTRUCTION: Begin your reply with <heard>verbatim transcript</heard>. If silence, use <heard>SILENCE</heard>.\n(transcribe this audio)"))
             }
             for (img in request.imageFilePaths) {
                 val bytes = File(img).readBytes()
@@ -73,6 +85,9 @@ class GeminiCloudFallback : CloudFallback {
         println("[Gemini] sendMessage historySize=${request.history.size} audio=${request.audioFilePath != null} images=${request.imageFilePaths.size} tools=${request.tools.size}")
         var response = chat.sendMessage(userMessage)
         var parsed = response.toTurnReply()
+
+        // Debug log the raw text to see if <heard> is missing
+        println("[Gemini] raw response text: ${parsed.text}")
 
         if (dispatcher == null) return parsed
 
@@ -99,7 +114,13 @@ class GeminiCloudFallback : CloudFallback {
     }
 
     private fun GenerateContentResponse.toTurnReply(): TurnReply {
-        val parts = candidates.firstOrNull()?.content?.parts.orEmpty()
+        val candidate = candidates.firstOrNull()
+        if (candidate == null) {
+            println("[Gemini] No candidates returned. Prompt feedback: $promptFeedback")
+            return TurnReply(text = "", toolCalls = emptyList())
+        }
+
+        val parts = candidate.content.parts
         val text = parts.filterIsInstance<TextPart>().joinToString("") { it.text }
         val calls = parts.filterIsInstance<FunctionCallPart>().mapIndexed { i, fc ->
             val argsJson = JSONObject().apply {
@@ -107,7 +128,7 @@ class GeminiCloudFallback : CloudFallback {
             }.toString()
             ToolCall(id = "call_$i", name = fc.name, argsJson = argsJson)
         }
-        println("[Gemini] reply textLen=${text.length} toolCalls=${calls.size}")
+        println("[Gemini] reply finishReason=${candidate.finishReason} textLen=${text.length} toolCalls=${calls.size}")
         return TurnReply(text = text, toolCalls = calls)
     }
 

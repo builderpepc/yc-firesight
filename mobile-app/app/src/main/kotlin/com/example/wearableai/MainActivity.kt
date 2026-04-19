@@ -143,14 +143,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestPermissions() {
-        val needed = arrayOf(
+        val needed = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
-        ).filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+            Manifest.permission.CAMERA
+        )
+        
+        // For Android 12 and below, we need READ_EXTERNAL_STORAGE to check for models on SD card
+        if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.S_V2) {
+            needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
 
-        if (needed.isEmpty()) {
+        val missing = needed.filter { 
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED 
+        }
+
+        if (missing.isEmpty()) {
             viewModel.onPermissionsGranted()
         } else {
-            permissionLauncher.launch(needed.toTypedArray())
+            permissionLauncher.launch(missing.toTypedArray())
         }
     }
 }

@@ -1,3 +1,4 @@
+local.properties
 .env
 .claude/
 .DS_Store

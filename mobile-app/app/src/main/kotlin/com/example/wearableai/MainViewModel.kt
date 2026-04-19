@@ -91,14 +91,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _inspectionEnabled.value = false
         _inspectionLabel.value = "Starting…"
         viewModelScope.launch {
+            val usingCloud = isOnline() && !_forceLocal.value
             _status.value = "Loading model…"
             try {
                 session.init(resolveModelPath())
             } catch (e: Throwable) {
-                _status.value = "Model load failed: ${e.message}"
-                _inspectionLabel.value = "Start Inspection"
-                _inspectionEnabled.value = true
-                return@launch
+                if (usingCloud) {
+                    android.util.Log.w("MainViewModel", "Local model load failed (continuing with cloud): ${e.message}")
+                } else {
+                    _status.value = "Model load failed: ${e.message}"
+                    _inspectionLabel.value = "Start Inspection"
+                    _inspectionEnabled.value = true
+                    return@launch
+                }
             }
             _status.value = "Connecting mic…"
             val connected = session.connect()
@@ -110,7 +115,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
 
             agentRunning = true
-            val usingCloud = isOnline() && !_forceLocal.value
             _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 4 E2B."
             session.start(
                 preferCloud = usingCloud,
@@ -250,9 +254,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun resolveModelPath(): String {
         val name = ModelConfig.GEMMA4_DIR
         val internal = File(getApplication<Application>().filesDir, name)
-        if (internal.isDirectory) return internal.absolutePath
         val sdCard = File(Environment.getExternalStorageDirectory(), name)
-        if (sdCard.isDirectory) return sdCard.absolutePath
+
+        fun isModelDir(dir: File): Boolean {
+            if (!dir.exists() || !dir.isDirectory) return false
+            if (File(dir, "config.txt").exists()) return true
+            // Fallback: check for any .gguf files
+            return dir.listFiles()?.any { it.name.endsWith(".gguf") } ?: false
+        }
+
+        // 1. Check internal files/gemma-4-E2B-it
+        if (isModelDir(internal)) return internal.absolutePath
+
+        // 2. Check SD card /sdcard/gemma-4-E2B-it
+        if (isModelDir(sdCard)) return sdCard.absolutePath
+
+        // 3. Check for nested dir (common mistake during extraction)
+        val nestedInternal = File(internal, name)
+        if (isModelDir(nestedInternal)) return nestedInternal.absolutePath
+
+        val nestedSd = File(sdCard, name)
+        if (isModelDir(nestedSd)) return nestedSd.absolutePath
+
+        // 4. Check for the HuggingFace repo name on SD card
+        val hfName = "google--gemma-4-E2B-it"
+        val hfSd = File(Environment.getExternalStorageDirectory(), hfName)
+        if (isModelDir(hfSd)) return hfSd.absolutePath
+
+        // 5. Check if the model is directly in files/ (no subfolder)
+        if (getApplication<Application>().filesDir.listFiles()?.any { it.name.endsWith(".gguf") } == true) {
+            return getApplication<Application>().filesDir.absolutePath
+        }
+
         return internal.absolutePath
     }
 

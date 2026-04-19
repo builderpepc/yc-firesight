@@ -11,7 +11,7 @@ object ModelConfig {
     // record of each user turn, since replaying audio in history corrupts Cactus's
     // prefix KV cache (see VoiceAgent.processUtterance).
     const val SYSTEM_PROMPT = """You are a helpful voice assistant running on a mobile device.
-The user is speaking to you through Meta AI glasses. Be concise — responses will be spoken aloud.
+The user is speaking to you through Meta AI glasses or a local device. Be concise — responses will be spoken aloud.
 Keep answers under 3 sentences unless the user asks for detail.
 
 For every user audio turn, begin your reply with a single line of the form
