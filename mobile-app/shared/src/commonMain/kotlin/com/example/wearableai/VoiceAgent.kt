@@ -25,6 +25,8 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 data class TurnResult(val userTranscript: String, val assistantReply: String)
 
+private val TOOL_CALL_REGEX = Regex("""<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>""")
+
 class VoiceAgent(private val cloudFallback: CloudFallback) {
 
     private var modelHandle: Long = 0L
@@ -78,6 +80,68 @@ class VoiceAgent(private val cloudFallback: CloudFallback) {
                 history.add(mapOf("role" to "assistant", "content" to turn.assistantReply))
             }
             turn
+        }
+    }
+
+    /**
+     * Text-only local path for the FunctionGemma backend. Transcript comes from
+     * Android's SpeechRecognizer — no audio or images are sent through Cactus.
+     */
+    suspend fun processTurnText(
+        transcript: String,
+        systemPrompt: String,
+        tools: List<ToolSpec>,
+        dispatcher: ToolDispatcher?,
+    ): TurnResult = turnMutex.withLock {
+        withContext(Dispatchers.Default) {
+            println("[VoiceAgent] processTurnText start transcriptLen=${transcript.length} tools=${tools.size}")
+            cactusReset(modelHandle)
+
+            val toolResults = mutableListOf<ToolResult>()
+            var loops = 0
+            var lastReply = TurnReply("", emptyList())
+
+            while (loops <= maxRoundtrips) {
+                val messagesJson = buildTextMessagesJson(
+                    systemPrompt = systemPrompt,
+                    userText = transcript,
+                    priorToolResults = toolResults,
+                )
+                val toolsJson = if (tools.isEmpty()) null else buildToolsJson(tools)
+                val resultJson = cactusComplete(
+                    model = modelHandle,
+                    messagesJson = messagesJson,
+                    optionsJson = ModelConfig.COMPLETION_OPTIONS_LOCAL,
+                    toolsJson = toolsJson,
+                    callback = null,
+                )
+                lastReply = parseCactusReply(resultJson)
+                // Fallback: models without native function-call templates (Gemma 3,
+                // Gemma 3n) emit <tool_call>{...}</tool_call> as prose per the system
+                // prompt. Cactus's structured parser misses them; scrape them here.
+                if (lastReply.toolCalls.isEmpty() && lastReply.text.contains("<tool_call>")) {
+                    val scraped = scrapeToolCalls(lastReply.text)
+                    if (scraped.isNotEmpty()) {
+                        val cleanedText = lastReply.text.replace(TOOL_CALL_REGEX, "").trim()
+                        lastReply = TurnReply(cleanedText, scraped)
+                    }
+                }
+                println("[VoiceAgent] local loop=$loops textLen=${lastReply.text.length} toolCalls=${lastReply.toolCalls.size} text=${lastReply.text.take(200)}")
+                if (lastReply.toolCalls.isEmpty() || dispatcher == null) break
+                for (call in lastReply.toolCalls) {
+                    val result = try {
+                        dispatcher.dispatch(call)
+                    } catch (t: Throwable) {
+                        ToolResult(call.id, call.name, """{"error":${jsonString(t.message ?: "unknown")}}""")
+                    }
+                    toolResults.add(result)
+                }
+                loops++
+            }
+
+            history.add(mapOf("role" to "user", "content" to transcript))
+            history.add(mapOf("role" to "assistant", "content" to lastReply.text))
+            TurnResult(transcript, lastReply.text.trim())
         }
     }
 
@@ -199,6 +263,29 @@ class VoiceAgent(private val cloudFallback: CloudFallback) {
         return sb.toString()
     }
 
+    private fun buildTextMessagesJson(
+        systemPrompt: String,
+        userText: String,
+        priorToolResults: List<ToolResult>,
+    ): String {
+        val sb = StringBuilder("[")
+        sb.append("""{"role":"system","content":${jsonString(systemPrompt)}}""")
+        for (msg in history) {
+            sb.append(",")
+            sb.append("""{"role":${jsonString(msg["role"]!!)},"content":${jsonString(msg["content"]!!)}}""")
+        }
+        sb.append(",")
+        sb.append("""{"role":"user","content":${jsonString(userText)}}""")
+        for (r in priorToolResults) {
+            sb.append(",")
+            sb.append(
+                """{"role":"tool","name":${jsonString(r.name)},"tool_call_id":${jsonString(r.id)},"content":${jsonString(r.resultJson)}}"""
+            )
+        }
+        sb.append("]")
+        return sb.toString()
+    }
+
     private fun buildToolsJson(tools: List<ToolSpec>): String {
         val sb = StringBuilder("[")
         tools.forEachIndexed { i, tool ->
@@ -270,6 +357,27 @@ class VoiceAgent(private val cloudFallback: CloudFallback) {
         val reply = raw.removeRange(match.range).trim()
         val normalizedTranscript = if (transcript.equals("SILENCE", ignoreCase = true)) "[silence]" else transcript
         return TurnResult(normalizedTranscript, reply)
+    }
+
+    private fun scrapeToolCalls(text: String): List<ToolCall> {
+        val matches = TOOL_CALL_REGEX.findAll(text).toList()
+        if (matches.isEmpty()) return emptyList()
+        return matches.mapIndexedNotNull { idx, m ->
+            val payload = m.groupValues[1].trim()
+            try {
+                val obj = Json.parseToJsonElement(payload).jsonObject
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return@mapIndexedNotNull null
+                val args = when (val a = obj["arguments"] ?: obj["args"]) {
+                    null -> "{}"
+                    is JsonObject -> a.toString()
+                    else -> a.toString()
+                }
+                ToolCall(id = "scraped_$idx", name = name, argsJson = args)
+            } catch (t: Throwable) {
+                println("[VoiceAgent] scrapeToolCalls: unparseable payload: ${payload.take(120)}")
+                null
+            }
+        }
     }
 
     private fun jsonString(s: String): String {

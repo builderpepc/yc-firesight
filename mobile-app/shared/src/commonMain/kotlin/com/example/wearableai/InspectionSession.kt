@@ -6,6 +6,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
@@ -23,17 +27,28 @@ import kotlinx.serialization.json.jsonPrimitive
  * and only speaks when the user asks a direct question.
  */
 class InspectionSession(
-    cloudFallback: CloudFallback,
+    private val cloudFallback: CloudFallback,
     private val ragIndexDir: String,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val agent = VoiceAgent(cloudFallback)
+    // Serializes reconciliation against itself so toggle-flip + top-of-turn
+    // drains can't double-fire against the same queue.
+    private val reconcileMutex = kotlinx.coroutines.sync.Mutex()
 
     val notes = NoteTaker()
     val building = BuildingContext()
     private val rag = BuildingDocRag(ragIndexDir)
     private val camera = CameraCapture()
+
+    // Photos captured during force-local operation that are awaiting cloud
+    // reconciliation. Snapshot persists so a restart doesn't lose them.
+    private val _deferredPhotos = MutableStateFlow<List<DeferredPhoto>>(emptyList())
+    val deferredPhotos: StateFlow<List<DeferredPhoto>> = _deferredPhotos.asStateFlow()
+
+    fun deferredPhotosSnapshot(): List<DeferredPhoto> = _deferredPhotos.value
+    fun setDeferredPhotos(list: List<DeferredPhoto>) { _deferredPhotos.value = list }
 
     /** Fired after any mutation the store should persist (note added, pin dropped,
      *  photo captured, turn completed, floor plan loaded). The ViewModel wires
@@ -74,15 +89,26 @@ class InspectionSession(
 
         collectJob = scope.launch {
             launch {
-                wearableConnector.startAudioStream { utteranceWavPath ->
-                    onUtterance(utteranceWavPath)
-                    queue.trySend(utteranceWavPath)
+                if (preferCloud) {
+                    wearableConnector.startAudioStream { utteranceWavPath ->
+                        onUtterance(utteranceWavPath)
+                        queue.trySend(utteranceWavPath)
+                    }
+                } else {
+                    // Local path: SpeechRecognizer emits a final transcript per utterance.
+                    // We push the transcript through the same queue so the consumer loop
+                    // below can stay shape-compatible with the cloud path.
+                    wearableConnector.startTranscriptStream { transcript ->
+                        onUtterance(transcript)
+                        queue.trySend(transcript)
+                    }
                 }
             }
             launch {
-                for (path in queue) {
+                for (item in queue) {
                     try {
-                        runOneTurn(path, preferCloud, onTurn, onPhoto)
+                        if (preferCloud) runCloudTurn(item, onTurn, onPhoto)
+                        else runLocalTurn(item, onTurn, onPhoto)
                     } catch (t: Throwable) {
                         println("[InspectionSession] turn failed: ${t::class.simpleName}: ${t.message}")
                         t.printStackTrace()
@@ -93,28 +119,77 @@ class InspectionSession(
         }
     }
 
-    private suspend fun runOneTurn(
+    private suspend fun runCloudTurn(
         audioPath: String,
-        preferCloud: Boolean,
         onTurn: (TurnResult) -> Unit,
         onPhoto: (String) -> Unit,
     ) {
+        // Drain any photos queued while we were force-local. Gemini reconciles
+        // them against the notes recorded so far before we process this turn.
+        drainDeferredPhotos()
+
         // Per-turn photo slot — capture_photo tool writes it, add_note reads it
         // so the photo auto-attaches to any notes recorded in the same turn.
         val turnPhoto = arrayOf<String?>(null)
-
         val result = agent.processTurn(
             audioFilePath = audioPath,
             imageFilePaths = emptyList(),
-            systemPrompt = InspectionPrompt.SYSTEM_PROMPT,
+            systemPrompt = InspectionPrompt.SYSTEM_PROMPT_CLOUD,
             tools = InspectionPrompt.TOOLS,
-            dispatcher = buildDispatcher(turnPhoto, onPhoto),
-            preferCloud = preferCloud,
+            dispatcher = buildDispatcher(turnPhoto, onPhoto, deferPhotos = false, transcriptForDeferral = null),
+            preferCloud = true,
         )
-        // History just got appended inside processTurn — persist the snapshot so
-        // a crash before the next turn doesn't lose this turn's context.
         onMutation?.invoke()
         onTurn(result)
+    }
+
+    private suspend fun runLocalTurn(
+        transcript: String,
+        onTurn: (TurnResult) -> Unit,
+        onPhoto: (String) -> Unit,
+    ) {
+        // Local path: FunctionGemma is text-only. Photos captured via capture_photo
+        // go onto a deferred queue and will be reconciled by Gemini on the next
+        // cloud turn. turnPhoto is unused here (kept for dispatcher-signature parity).
+        val turnPhoto = arrayOf<String?>(null)
+        val result = agent.processTurnText(
+            transcript = transcript,
+            systemPrompt = InspectionPrompt.SYSTEM_PROMPT_LOCAL,
+            tools = InspectionPrompt.TOOLS,
+            dispatcher = buildDispatcher(turnPhoto, onPhoto, deferPhotos = true, transcriptForDeferral = transcript),
+        )
+        onMutation?.invoke()
+        onTurn(result)
+    }
+
+    /**
+     * Reconciles the deferred-photo queue against the current notes via the
+     * cloud backend. Safe to call from the VM (e.g. when the user flips force-
+     * local off) or automatically at the start of each cloud turn. No-op when
+     * the queue is empty or reconciliation fails — failed items remain queued
+     * for a later retry.
+     */
+    suspend fun drainDeferredPhotos(): Int = reconcileMutex.withLock {
+        val pending = _deferredPhotos.value
+        if (pending.isEmpty()) return 0
+        val result = try {
+            cloudFallback.reconcilePhotos(notes.notes.value, pending)
+        } catch (t: Throwable) {
+            println("[InspectionSession] reconcilePhotos failed: ${t::class.simpleName}: ${t.message}")
+            return 0
+        }
+        var attached = 0
+        val resolvedPaths = mutableSetOf<String>()
+        for (att in result) {
+            resolvedPaths.add(att.photoPath)
+            val noteId = att.noteId ?: continue
+            if (notes.attachPhoto(noteId, att.photoPath)) attached++
+        }
+        // Drop every photo the model considered — even unmatched ones — so we
+        // don't endlessly re-send the same null-attachments on every cloud turn.
+        _deferredPhotos.value = pending.filter { it.photoPath !in resolvedPaths }
+        onMutation?.invoke()
+        attached
     }
 
     /** Exposed so the VM can grab the agent's history for session persistence. */
@@ -134,13 +209,18 @@ class InspectionSession(
     private fun buildDispatcher(
         turnPhoto: Array<String?>,
         onPhoto: (String) -> Unit,
+        deferPhotos: Boolean,
+        transcriptForDeferral: String?,
     ): ToolDispatcher = ToolDispatcher { call ->
         when (call.name) {
-            "add_note" -> handleAddNote(call, turnPhoto[0])
+            // On the local path add_note never gets a photo inline — photos are
+            // deferred and reconciled later by Gemini. Pass null so the note is
+            // recorded photo-less; reconciliation may patch photoPath in later.
+            "add_note" -> handleAddNote(call, if (deferPhotos) null else turnPhoto[0])
             "drop_pin" -> handleDropPin(call)
             "query_docs" -> handleQueryDocs(call)
             "read_notes" -> handleReadNotes(call)
-            "capture_photo" -> handleCapturePhoto(call, turnPhoto, onPhoto)
+            "capture_photo" -> handleCapturePhoto(call, turnPhoto, onPhoto, deferPhotos, transcriptForDeferral)
             else -> ToolResult(call.id, call.name, """{"error":"unknown tool"}""")
         }
     }
@@ -149,10 +229,22 @@ class InspectionSession(
         call: ToolCall,
         turnPhoto: Array<String?>,
         onPhoto: (String) -> Unit,
+        deferPhotos: Boolean,
+        transcriptForDeferral: String?,
     ): ToolResult {
         val path = camera.capture(timeoutMs = 3000)
         if (path == null) {
             return ToolResult(call.id, call.name, """{"ok":false,"reason":"capture failed or timed out"}""")
+        }
+        if (deferPhotos) {
+            _deferredPhotos.value = _deferredPhotos.value + DeferredPhoto(
+                photoPath = path,
+                capturedAtMs = currentTimeMs(),
+                transcript = transcriptForDeferral.orEmpty(),
+            )
+            onPhoto(path)
+            onMutation?.invoke()
+            return ToolResult(call.id, call.name, """{"ok":true,"deferred":true}""")
         }
         turnPhoto[0] = path
         onPhoto(path)
@@ -235,6 +327,7 @@ class InspectionSession(
 
     fun stop() {
         wearableConnector.stopAudioStream()
+        wearableConnector.stopTranscriptStream()
         collectJob?.cancel()
         collectJob = null
     }
@@ -251,6 +344,7 @@ class InspectionSession(
         agent.resetConversation()
         notes.clear()
         building.clear()
+        _deferredPhotos.value = emptyList()
     }
 
     fun destroy() {

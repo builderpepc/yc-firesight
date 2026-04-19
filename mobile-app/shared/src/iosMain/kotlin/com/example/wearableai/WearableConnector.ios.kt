@@ -16,4 +16,10 @@ actual class WearableConnector {
     }
 
     actual fun stopAudioStream() {}
+
+    actual fun startTranscriptStream(onTranscript: TranscriptCallback) {
+        TODO("Implement with Apple SFSpeechRecognizer")
+    }
+
+    actual fun stopTranscriptStream() {}
 }

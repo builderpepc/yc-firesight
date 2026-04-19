@@ -35,6 +35,7 @@ actual class WearableConnector {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var recordJob: Job? = null
     private var audioRecord: AudioRecord? = null
+    private var transcriptAsr: AndroidSpeechRecognizerAsr? = null
 
     actual suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -54,6 +55,7 @@ actual class WearableConnector {
 
     actual fun endSession() {
         stopAudioStream()
+        stopTranscriptStream()
         val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             audioManager.clearCommunicationDevice()
@@ -174,6 +176,22 @@ actual class WearableConnector {
         recordJob?.cancel()
         recordJob = null
         android.util.Log.d(TAG, "Audio stream stopped")
+    }
+
+    actual fun startTranscriptStream(onTranscript: TranscriptCallback) {
+        stopTranscriptStream()
+        // The BT SCO route established by connect() applies system-wide for
+        // VOICE_COMMUNICATION-sourced consumers; the recognizer inherits it.
+        val asr = AndroidSpeechRecognizerAsr(appContext)
+        transcriptAsr = asr
+        asr.start(onTranscript)
+        android.util.Log.d(TAG, "Transcript stream started (SpeechRecognizer)")
+    }
+
+    actual fun stopTranscriptStream() {
+        transcriptAsr?.stop()
+        transcriptAsr = null
+        android.util.Log.d(TAG, "Transcript stream stopped")
     }
 
     private fun routeAudioToBluetoothSco() {

@@ -57,6 +57,14 @@ fun interface ToolDispatcher {
     suspend fun dispatch(call: ToolCall): ToolResult
 }
 
+/** One photo → note mapping returned by the cloud reconciler. [noteId] may be
+ *  null if no note in [notes] cleanly matches, in which case the photo is
+ *  dropped from the queue without being attached. */
+data class PhotoAttachment(
+    val photoPath: String,
+    val noteId: String?,
+)
+
 /** Cloud inference interface — implemented per-platform and injected into the session. */
 interface CloudFallback {
     /**
@@ -66,4 +74,16 @@ interface CloudFallback {
      * or the per-turn roundtrip cap is reached.
      */
     suspend fun generateTurn(request: TurnRequest, dispatcher: ToolDispatcher?): TurnReply
+
+    /**
+     * Reconciles offline-captured photos against the current notes. Given the
+     * notes recorded so far and the queued [DeferredPhoto]s (each carrying the
+     * utterance transcript that triggered capture), the cloud model decides
+     * which note each photo best illustrates. Returns one [PhotoAttachment] per
+     * pending photo; [PhotoAttachment.noteId] is null when no match is good.
+     */
+    suspend fun reconcilePhotos(
+        notes: List<Note>,
+        pending: List<DeferredPhoto>,
+    ): List<PhotoAttachment>
 }

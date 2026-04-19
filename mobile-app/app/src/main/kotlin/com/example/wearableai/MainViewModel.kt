@@ -3,12 +3,15 @@ package com.example.wearableai
 import android.app.Application
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Environment
 import android.speech.tts.TextToSpeech
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.wearableai.shared.InspectionPrompt
 import com.example.wearableai.shared.InspectionSession
 import com.example.wearableai.shared.ModelConfig
 import com.example.wearableai.shared.NoteCategory
@@ -82,6 +85,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val pins: StateFlow<List<Pin>> get() = session.building.pins
     val floorPlanPath: StateFlow<String?> get() = session.building.floorPlanPath
     val docsIndexedChunks: StateFlow<Int> get() = session.building.docsIndexedChunks
+    val deferredPhotos get() = session.deferredPhotos
 
     private var agentRunning = false
     private var ttsReady = false
@@ -91,6 +95,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // the VM can build a fresh snapshot on every mutation without re-parsing disk.
     private var currentCreatedAtMs: Long = 0L
 
+    private val connectivityManager =
+        app.getSystemService(ConnectivityManager::class.java)
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            // Regardless of force-local state, as soon as internet returns we try
+            // to drain any photos captured while offline. No-op if queue is empty.
+            viewModelScope.launch { maybeDrainDeferredPhotos(reason = "network returned") }
+        }
+    }
+
     init {
         tts = TextToSpeech(app) { status ->
             if (status == TextToSpeech.SUCCESS) {
@@ -99,7 +113,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         session.onMutation = { scheduleSave() }
+        val req = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            .build()
+        connectivityManager.registerNetworkCallback(req, networkCallback)
         viewModelScope.launch { resumeOrCreateSession() }
+    }
+
+    /** Drains deferred photos via cloud if there's anything to drain and we're
+     *  actually online. Safe to call from any trigger (network-return, toggle,
+     *  manual). Concurrent calls are serialized by [InspectionSession.drainDeferredPhotos]. */
+    private suspend fun maybeDrainDeferredPhotos(reason: String) {
+        val pending = session.deferredPhotos.value
+        if (pending.isEmpty() || !isOnline()) return
+        val count = pending.size
+        android.util.Log.d("MainViewModel", "drain trigger=$reason count=$count")
+        _status.value = "Reconciling $count photo${if (count == 1) "" else "s"}…"
+        val attached = session.drainDeferredPhotos()
+        _status.value = "Reconciled $attached of $count."
     }
 
     private fun speak(text: String) {
@@ -107,7 +139,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "assistant-${System.currentTimeMillis()}")
     }
 
-    fun setForceLocal(enabled: Boolean) { _forceLocal.value = enabled }
+    fun setForceLocal(enabled: Boolean) {
+        val previous = _forceLocal.value
+        _forceLocal.value = enabled
+        // Flipping back to cloud drains any photos captured while offline, even
+        // without waiting for the next utterance — so the user sees attachments
+        // resolve immediately after switching.
+        if (previous && !enabled) {
+            viewModelScope.launch { maybeDrainDeferredPhotos(reason = "toggle off") }
+        }
+    }
 
     fun onPermissionsGranted() {
         _status.value = "Ready — tap Start Inspection."
@@ -154,16 +195,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             agentRunning = true
             val usingCloud = isOnline() && !_forceLocal.value
-            _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 4 E2B."
+            _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 3 1B."
             session.start(
                 preferCloud = usingCloud,
                 onUtterance = {
-                    viewModelScope.launch { _status.value = if (usingCloud) "Thinking… (Gemini)" else "Thinking… (Gemma 4)" }
+                    viewModelScope.launch { _status.value = if (usingCloud) "Thinking… (Gemini)" else "Thinking… (Gemma 3 1B)" }
                 },
                 onTurn = { turn ->
                     viewModelScope.launch {
-                        _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 4 E2B."
-                        if (turn.assistantReply.isNotBlank()) speak(turn.assistantReply)
+                        _status.value = if (usingCloud) "Inspecting — Gemini 2.5 Flash." else "Inspecting — local Gemma 3 1B."
+                        // Local path: Gemma 3 1B 270M tends to paraphrase the system
+                        // prompt back at us for observation turns instead of staying
+                        // silent like we asked. Enforce silence at the TTS layer —
+                        // only speak when the transcript is clearly a direct question.
+                        val shouldSpeak = turn.assistantReply.isNotBlank() &&
+                            (usingCloud || InspectionPrompt.isQATrigger(turn.userTranscript))
+                        if (shouldSpeak) speak(turn.assistantReply)
                     }
                 },
                 onPhoto = { path ->
@@ -387,6 +434,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             session.building.replace(floorAbs, snap.pins)
             session.restoreConversation(snap.history)
             session.setSessionPhotosDir(store.photosDir(snap.id).absolutePath)
+            session.setDeferredPhotos(snap.deferredPhotos)
 
             _currentSessionId.value = snap.id
             _currentSessionName.value = snap.name
@@ -416,6 +464,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             notes = session.notes.notes.value,
             pins = session.building.pins.value,
             history = session.historySnapshot(),
+            deferredPhotos = session.deferredPhotosSnapshot(),
         )
         store.scheduleSave(snap)
     }
@@ -424,13 +473,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
         session.destroy()
         tts?.stop()
         tts?.shutdown()
     }
 
     private fun resolveModelPath(): String {
-        val name = ModelConfig.GEMMA4_DIR
+        val name = ModelConfig.GEMMA3_1B_DIR
         val internal = File(getApplication<Application>().filesDir, name)
         if (internal.isDirectory) return internal.absolutePath
         val sdCard = File(Environment.getExternalStorageDirectory(), name)

@@ -1,5 +1,6 @@
 package com.example.wearableai.shared
 
+import kotlin.random.Random
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +26,9 @@ enum class NoteCategory(val key: String, val heading: String) {
 
 @Serializable
 data class Note(
+    // Stable per-note ID. Empty string default allows back-compat decoding of pre-id snapshots —
+    // InspectionStore.load fills any blanks. Newly created notes always get a real id from NoteTaker.add.
+    val id: String = "",
     val category: NoteCategory,
     val markdown: String,
     val timestampMs: Long,
@@ -40,7 +44,13 @@ class NoteTaker {
     val notes: StateFlow<List<Note>> = _notes.asStateFlow()
 
     fun add(category: NoteCategory, markdown: String, photoPath: String? = null, nowMs: Long) {
-        val note = Note(category, markdown.trim(), nowMs, photoPath)
+        val note = Note(
+            id = generateNoteId(nowMs),
+            category = category,
+            markdown = markdown.trim(),
+            timestampMs = nowMs,
+            photoPath = photoPath,
+        )
         _notes.value = _notes.value + note
     }
 
@@ -50,6 +60,16 @@ class NoteTaker {
 
     fun replaceAll(list: List<Note>) {
         _notes.value = list
+    }
+
+    /** Patch the photoPath of an existing note. Used by deferred-photo reconciliation
+     *  when the cloud backend ties a queued photo back to a previously-recorded note. */
+    fun attachPhoto(noteId: String, photoPath: String): Boolean {
+        val current = _notes.value
+        val idx = current.indexOfFirst { it.id == noteId }
+        if (idx < 0) return false
+        _notes.value = current.toMutableList().apply { set(idx, current[idx].copy(photoPath = photoPath)) }
+        return true
     }
 
     /** Grouped markdown rendering. One H2 per non-empty category, bullets beneath. */
@@ -70,3 +90,7 @@ class NoteTaker {
         return sb.toString().trimEnd()
     }
 }
+
+/** Stable per-note ID. Random suffix collision-free in practice for single-user usage. */
+fun generateNoteId(nowMs: Long): String =
+    "$nowMs-${Random.nextLong().toString(16).removePrefix("-")}"

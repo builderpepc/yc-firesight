@@ -1,7 +1,11 @@
 package com.example.wearableai
 
+import android.util.Log
 import com.example.wearableai.shared.CloudFallback
+import com.example.wearableai.shared.DeferredPhoto
 import com.example.wearableai.shared.ModelConfig
+import com.example.wearableai.shared.Note
+import com.example.wearableai.shared.PhotoAttachment
 import com.example.wearableai.shared.ToolCall
 import com.example.wearableai.shared.ToolDispatcher
 import com.example.wearableai.shared.ToolResult
@@ -18,7 +22,9 @@ import com.google.ai.client.generativeai.type.Schema
 import com.google.ai.client.generativeai.type.TextPart
 import com.google.ai.client.generativeai.type.Tool
 import com.google.ai.client.generativeai.type.content
+import com.google.ai.client.generativeai.type.generationConfig
 import java.io.File
+import org.json.JSONArray
 import org.json.JSONObject
 
 class GeminiCloudFallback : CloudFallback {
@@ -96,6 +102,85 @@ class GeminiCloudFallback : CloudFallback {
             loops++
         }
         return parsed
+    }
+
+    override suspend fun reconcilePhotos(
+        notes: List<Note>,
+        pending: List<DeferredPhoto>,
+    ): List<PhotoAttachment> {
+        if (pending.isEmpty()) return emptyList()
+
+        val systemPrompt = """You are reconciling offline-captured inspection photos against the notes the inspector recorded.
+For each photo you receive, decide which note (if any) it best illustrates. Use the utterance transcript that triggered the capture as the primary hint — photos are almost always taken right as the inspector is describing what they see. The photo content itself is a secondary hint.
+
+Respond with ONLY a JSON array, no prose, no markdown fences. Schema:
+  [{"photo_path": "<exact path you were given>", "note_id": "<id from the notes list, or null>"}, ...]
+
+Return exactly one entry per photo. If no note is a clear match, set note_id to null rather than forcing a bad attachment."""
+
+        val model = GenerativeModel(
+            modelName = ModelConfig.GEMINI_MODEL,
+            apiKey = BuildConfig.GEMINI_API_KEY,
+            systemInstruction = content { text(systemPrompt) },
+            generationConfig = generationConfig { responseMimeType = "application/json" },
+        )
+
+        val notesBlock = buildString {
+            append("Notes recorded so far (JSON):\n")
+            val arr = JSONArray()
+            for (n in notes) {
+                arr.put(JSONObject().apply {
+                    put("id", n.id)
+                    put("category", n.category.key)
+                    put("markdown", n.markdown)
+                    put("timestamp_ms", n.timestampMs)
+                    put("has_photo", n.photoPath != null)
+                })
+            }
+            append(arr.toString())
+        }
+
+        val userMessage = content(role = "user") {
+            part(TextPart(notesBlock))
+            for (p in pending) {
+                val header = "Photo — captured_at_ms=${p.capturedAtMs}, transcript=${JSONObject.quote(p.transcript)}, photo_path=${JSONObject.quote(p.photoPath)}"
+                part(TextPart(header))
+                try {
+                    part(BlobPart("image/jpeg", File(p.photoPath).readBytes()))
+                } catch (t: Throwable) {
+                    Log.w("GeminiReconcile", "failed reading ${p.photoPath}: ${t.message}")
+                }
+            }
+            part(TextPart("Return the JSON array now."))
+        }
+
+        Log.d("GeminiReconcile", "reconciling ${pending.size} photos against ${notes.size} notes")
+        val response = model.generateContent(userMessage)
+        val raw = response.candidates.firstOrNull()?.content?.parts
+            ?.filterIsInstance<TextPart>()?.joinToString("") { it.text }
+            ?: ""
+        return parseReconciliationJson(raw, pending)
+    }
+
+    private fun parseReconciliationJson(
+        raw: String,
+        pending: List<DeferredPhoto>,
+    ): List<PhotoAttachment> {
+        val trimmed = raw.trim().trim('`').trim().removePrefix("json").trim()
+        val arr = try {
+            JSONArray(trimmed)
+        } catch (t: Throwable) {
+            Log.w("GeminiReconcile", "unparseable response, dropping all: ${t.message}: ${raw.take(200)}")
+            return pending.map { PhotoAttachment(it.photoPath, null) }
+        }
+        val byPath = mutableMapOf<String, String?>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val path = o.optString("photo_path").takeIf { it.isNotBlank() } ?: continue
+            val noteId = if (o.isNull("note_id")) null else o.optString("note_id").takeIf { it.isNotBlank() }
+            byPath[path] = noteId
+        }
+        return pending.map { PhotoAttachment(it.photoPath, byPath[it.photoPath]) }
     }
 
     private fun GenerateContentResponse.toTurnReply(): TurnReply {

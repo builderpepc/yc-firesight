@@ -16,6 +16,7 @@ data class SessionSnapshot(
     val notes: List<Note>,
     val pins: List<Pin>,
     val history: List<Map<String, String>>,
+    val deferredPhotos: List<DeferredPhoto> = emptyList(),
 )
 
 /** Lightweight row for the sessions list UI — avoids parsing the full snapshot. */

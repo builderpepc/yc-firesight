@@ -3,6 +3,7 @@ package com.example.wearableai
 import android.util.Log
 import com.example.wearableai.shared.SessionSnapshot
 import com.example.wearableai.shared.SessionSummary
+import com.example.wearableai.shared.generateNoteId
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -86,7 +87,13 @@ class InspectionStore(
 
     suspend fun load(id: String): SessionSnapshot = withContext(Dispatchers.IO) {
         val text = snapshotFile(id).readText()
-        json.decodeFromString(SessionSnapshot.serializer(), text)
+        val raw = json.decodeFromString(SessionSnapshot.serializer(), text)
+        // Back-compat: pre-id snapshots have notes with id="". Patch in stable ids on load.
+        val needsMigration = raw.notes.any { it.id.isBlank() }
+        if (!needsMigration) raw
+        else raw.copy(notes = raw.notes.map { n ->
+            if (n.id.isNotBlank()) n else n.copy(id = generateNoteId(n.timestampMs))
+        })
     }
 
     /** Debounced save — coalesces bursts of mutations (e.g. a single turn with

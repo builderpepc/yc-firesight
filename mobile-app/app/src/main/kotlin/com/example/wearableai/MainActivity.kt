@@ -148,9 +148,12 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
-                    viewModel.status.collect {
-                        binding.tvStatus.text = it
-                        setThinkingPulse(it.startsWith("Thinking"))
+                    kotlinx.coroutines.flow.combine(
+                        viewModel.status,
+                        viewModel.deferredPhotos,
+                    ) { msg, pending -> msg to pending.size }.collect { (msg, count) ->
+                        binding.tvStatus.text = if (count > 0) "$msg  📷 $count pending" else msg
+                        setThinkingPulse(msg.startsWith("Thinking"))
                     }
                 }
                 launch {
