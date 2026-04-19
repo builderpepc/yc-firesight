@@ -121,30 +121,61 @@ actual class WearableConnector {
         record.startRecording()
         val sampleRate = 16_000
         recordJob = scope.launch {
+            var currentRecord = record
             val chunk = ByteArray(bufferSize)
             val utterance = mutableListOf<ByteArray>()
             var silenceFrames = 0
             var totalFrames = 0
-            // ~700 ms of silence to end an utterance
-            val silenceThreshold = (0.7 * sampleRate * 2 / bufferSize).toInt().coerceAtLeast(1)
-            // minimum ~0.5 s of speech to avoid BT noise bursts (500ms * 16000 * 2 / bufferSize)
-            val minSpeechChunks = (0.5 * sampleRate * 2 / bufferSize).toInt().coerceAtLeast(1)
+            var consecutiveZeroBlocks = 0
+            // ~400 ms of silence to end an utterance (snappier response)
+            val silenceThreshold = (0.4 * sampleRate * 2 / bufferSize).toInt().coerceAtLeast(1)
+            // minimum ~0.3 s of speech to avoid noise bursts
+            val minSpeechChunks = (0.3 * sampleRate * 2 / bufferSize).toInt().coerceAtLeast(1)
 
             android.util.Log.d(TAG, "Audio loop started. silenceThreshold=$silenceThreshold minSpeech=$minSpeechChunks")
 
             while (isActive) {
-                val read = record.read(chunk, 0, chunk.size)
+                val read = currentRecord.read(chunk, 0, chunk.size)
                 if (read <= 0) { delay(10); continue }
 
                 val frame = chunk.copyOf(read)
                 val peak = frame.peakAmplitude()
-                // 1500 was too high — agent was missing normal-volume speech.
-                // 800 still rejects HVAC hum / breathing seen at ~500 peak.
-                val isSilent = peak < 800
+                // 400 for emulator compatibility (emulator mic levels are lower).
+                val isSilent = peak < 400
 
                 totalFrames++
+
+                // Detect dead mic: if we get 200+ consecutive zero-peak frames (~25s),
+                // re-initialize the AudioRecord to recover the emulator mic.
+                if (peak == 0) {
+                    consecutiveZeroBlocks++
+                    if (consecutiveZeroBlocks >= 200 && utterance.isEmpty()) {
+                        android.util.Log.w(TAG, "Dead mic detected ($consecutiveZeroBlocks zero frames) — reinitializing AudioRecord")
+                        currentRecord.stop()
+                        currentRecord.release()
+                        val newRecord = AudioRecord(
+                            MediaRecorder.AudioSource.MIC, sampleRate,
+                            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize
+                        )
+                        if (newRecord.state == AudioRecord.STATE_INITIALIZED) {
+                            newRecord.startRecording()
+                            currentRecord = newRecord
+                            audioRecord = newRecord
+                            android.util.Log.d(TAG, "AudioRecord re-initialized successfully")
+                        } else {
+                            android.util.Log.e(TAG, "AudioRecord re-init failed")
+                            newRecord.release()
+                        }
+                        consecutiveZeroBlocks = 0
+                        totalFrames = 0
+                        continue
+                    }
+                } else {
+                    consecutiveZeroBlocks = 0
+                }
+
                 if (totalFrames % 100 == 0) {
-                    android.util.Log.d(TAG, "Audio: frames=$totalFrames peak=$peak utteranceChunks=${utterance.size} silenceFrames=$silenceFrames")
+                    android.util.Log.d(TAG, "Audio: frames=$totalFrames peak=$peak utteranceChunks=${utterance.size} silenceFrames=$silenceFrames zeros=$consecutiveZeroBlocks")
                 }
 
                 if (!isSilent) {
