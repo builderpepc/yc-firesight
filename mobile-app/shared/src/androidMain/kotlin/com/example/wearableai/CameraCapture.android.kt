@@ -17,6 +17,11 @@ private const val TAG = "CameraCapture"
 actual class CameraCapture actual constructor() {
 
     private var session: StreamSession? = null
+    @Volatile private var outputDir: String? = null
+
+    actual fun setOutputDir(dir: String?) {
+        outputDir = dir
+    }
 
     actual suspend fun open(): Boolean {
         if (session != null) return true
@@ -77,16 +82,19 @@ actual class CameraCapture actual constructor() {
 
     private fun writePhoto(photo: PhotoData): String {
         val ts = System.currentTimeMillis()
+        // outputDir points to the active session's photos dir; fall back to cache
+        // so ad-hoc captures (before a session exists) still work.
+        val destDir = outputDir?.let { File(it).apply { mkdirs() } } ?: appContext.cacheDir
         return when (photo) {
             is PhotoData.Bitmap -> {
-                val file = File(appContext.cacheDir, "photo_$ts.jpg")
+                val file = File(destDir, "photo_$ts.jpg")
                 FileOutputStream(file).use { fos ->
                     photo.bitmap.compress(Bitmap.CompressFormat.JPEG, 85, fos)
                 }
                 file.absolutePath
             }
             is PhotoData.HEIC -> {
-                val file = File(appContext.cacheDir, "photo_$ts.heic")
+                val file = File(destDir, "photo_$ts.heic")
                 val bytes = ByteArray(photo.data.remaining())
                 photo.data.duplicate().get(bytes)
                 FileOutputStream(file).use { it.write(bytes) }

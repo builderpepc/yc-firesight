@@ -69,6 +69,9 @@ dependencies {
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
 
+    // JSON serialization runtime (schemas defined in :shared with the plugin)
+    implementation(libs.kotlinx.serialization.json)
+
     // Meta Wearables Device Access Toolkit
     implementation(libs.mwdat.core)
     implementation(libs.mwdat.camera)

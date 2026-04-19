@@ -3,8 +3,10 @@ package com.example.wearableai.shared
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.Serializable
 
 /** NFPA 1620-leaning category tags. Freeform markdown still wins — this is just for grouping. */
+@Serializable
 enum class NoteCategory(val key: String, val heading: String) {
     CONSTRUCTION("construction", "Construction"),
     ACCESS("access", "Access & Egress"),
@@ -21,6 +23,7 @@ enum class NoteCategory(val key: String, val heading: String) {
     }
 }
 
+@Serializable
 data class Note(
     val category: NoteCategory,
     val markdown: String,
@@ -43,6 +46,10 @@ class NoteTaker {
 
     fun clear() {
         _notes.value = emptyList()
+    }
+
+    fun replaceAll(list: List<Note>) {
+        _notes.value = list
     }
 
     /** Grouped markdown rendering. One H2 per non-empty category, bullets beneath. */

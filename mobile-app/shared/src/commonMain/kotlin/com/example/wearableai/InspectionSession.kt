@@ -35,6 +35,11 @@ class InspectionSession(
     private val rag = BuildingDocRag(ragIndexDir)
     private val camera = CameraCapture()
 
+    /** Fired after any mutation the store should persist (note added, pin dropped,
+     *  photo captured, turn completed, floor plan loaded). The ViewModel wires
+     *  this to a debounced `scheduleSave(snapshot())`. */
+    var onMutation: (() -> Unit)? = null
+
     private var collectJob: Job? = null
 
     /** Must be called before [start]. [modelPath] points to the on-device GGUF dir. */
@@ -106,7 +111,24 @@ class InspectionSession(
             dispatcher = buildDispatcher(turnPhoto, onPhoto),
             preferCloud = preferCloud,
         )
+        // History just got appended inside processTurn — persist the snapshot so
+        // a crash before the next turn doesn't lose this turn's context.
+        onMutation?.invoke()
         onTurn(result)
+    }
+
+    /** Exposed so the VM can grab the agent's history for session persistence. */
+    fun historySnapshot(): List<Map<String, String>> = agent.historySnapshot()
+
+    /** Restore a loaded session's conversation history into the agent. Must be
+     *  called on the IO/Default scope — it suspends on the agent's turn mutex. */
+    suspend fun restoreConversation(saved: List<Map<String, String>>) {
+        agent.restoreConversation(saved)
+    }
+
+    /** Redirect subsequent captures into [dir]. Passing null restores cache-dir default. */
+    fun setSessionPhotosDir(dir: String?) {
+        camera.setOutputDir(dir)
     }
 
     private fun buildDispatcher(
@@ -134,6 +156,7 @@ class InspectionSession(
         }
         turnPhoto[0] = path
         onPhoto(path)
+        onMutation?.invoke()
         return ToolResult(call.id, call.name, """{"ok":true}""")
     }
 
@@ -154,6 +177,7 @@ class InspectionSession(
         val category = NoteCategory.fromKey(catKey)
         if (md.isNotBlank()) {
             notes.add(category, md, photoPath, currentTimeMs())
+            onMutation?.invoke()
         }
         return ToolResult(call.id, call.name, """{"ok":true}""")
     }
@@ -168,6 +192,7 @@ class InspectionSession(
         val label = args["label"]?.jsonPrimitive?.contentOrNull ?: "POI"
         val severity = PinSeverity.fromKey(args["severity"]?.jsonPrimitive?.contentOrNull ?: "info")
         building.addPin(x, y, label, severity)
+        onMutation?.invoke()
         return ToolResult(call.id, call.name, """{"ok":true}""")
     }
 
@@ -192,10 +217,21 @@ class InspectionSession(
 
     fun loadFloorPlan(path: String?) {
         building.setFloorPlan(path)
+        onMutation?.invoke()
+    }
+
+    /** Session-layer helper so the manual-pin path also fires [onMutation]. */
+    fun addManualPin(x: Float, y: Float, label: String, severity: PinSeverity) {
+        building.addPin(x, y, label, severity)
+        onMutation?.invoke()
     }
 
     /** Manual photo trigger — e.g. phone UI button. */
-    suspend fun captureNow(): String? = camera.capture()
+    suspend fun captureNow(): String? {
+        val path = camera.capture()
+        if (path != null) onMutation?.invoke()
+        return path
+    }
 
     fun stop() {
         wearableConnector.stopAudioStream()

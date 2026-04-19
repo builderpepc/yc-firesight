@@ -1,6 +1,7 @@
 package com.example.wearableai
 
 import android.app.Application
+import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -13,6 +14,8 @@ import com.example.wearableai.shared.ModelConfig
 import com.example.wearableai.shared.NoteCategory
 import com.example.wearableai.shared.Pin
 import com.example.wearableai.shared.PinSeverity
+import com.example.wearableai.shared.SessionSnapshot
+import com.example.wearableai.shared.SessionSummary
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +28,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val PREFS_NAME = "inspection_prefs"
+private const val KEY_CURRENT_SESSION = "currentSessionId"
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val session = InspectionSession(
@@ -32,7 +38,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ragIndexDir = File(app.filesDir, "rag_index").apply { mkdirs() }.absolutePath,
     )
 
-    private val _status = MutableStateFlow("Ready — tap Start Inspection to begin.")
+    private val store = InspectionStore(
+        rootDir = File(app.filesDir, "inspections").apply { mkdirs() },
+        saveScope = viewModelScope,
+    )
+
+    private val prefs = app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private val _status = MutableStateFlow("Loading last inspection…")
     val status: StateFlow<String> = _status.asStateFlow()
 
     private val _inspectionEnabled = MutableStateFlow(false)
@@ -41,11 +54,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _inspectionLabel = MutableStateFlow("Start Inspection")
     val inspectionLabel: StateFlow<String> = _inspectionLabel.asStateFlow()
 
+    /** "Start" for empty sessions, "Resume" once the session already has prior
+     *  observations or conversation history to pick back up from. */
+    private fun idleLabel(): String {
+        val hasState = session.notes.notes.value.isNotEmpty() ||
+            session.building.pins.value.isNotEmpty() ||
+            session.historySnapshot().isNotEmpty()
+        return if (hasState) "Resume Inspection" else "Start Inspection"
+    }
+
     private val _forceLocal = MutableStateFlow(false)
     val forceLocal: StateFlow<Boolean> = _forceLocal.asStateFlow()
 
     private val _pdfExported = MutableSharedFlow<File>(extraBufferCapacity = 1)
     val pdfExported: SharedFlow<File> = _pdfExported.asSharedFlow()
+
+    private val _sessions = MutableStateFlow<List<SessionSummary>>(emptyList())
+    val sessions: StateFlow<List<SessionSummary>> = _sessions.asStateFlow()
+
+    private val _currentSessionId = MutableStateFlow("")
+    val currentSessionId: StateFlow<String> = _currentSessionId.asStateFlow()
+
+    private val _currentSessionName = MutableStateFlow("")
+    val currentSessionName: StateFlow<String> = _currentSessionName.asStateFlow()
 
     val notes get() = session.notes.notes
     val pins: StateFlow<List<Pin>> get() = session.building.pins
@@ -56,6 +87,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var ttsReady = false
     private var tts: TextToSpeech? = null
 
+    // Session metadata for the active snapshot — kept out of SessionSnapshot so
+    // the VM can build a fresh snapshot on every mutation without re-parsing disk.
+    private var currentCreatedAtMs: Long = 0L
+
     init {
         tts = TextToSpeech(app) { status ->
             if (status == TextToSpeech.SUCCESS) {
@@ -63,6 +98,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 ttsReady = true
             }
         }
+        session.onMutation = { scheduleSave() }
+        viewModelScope.launch { resumeOrCreateSession() }
     }
 
     private fun speak(text: String) {
@@ -102,7 +139,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 session.init(resolveModelPath())
             } catch (e: Throwable) {
                 _status.value = "Model load failed: ${e.message}"
-                _inspectionLabel.value = "Start Inspection"
+                _inspectionLabel.value = idleLabel()
                 _inspectionEnabled.value = true
                 return@launch
             }
@@ -110,7 +147,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val connected = session.connect()
             if (!connected) {
                 _status.value = "Connection failed — is the device paired?"
-                _inspectionLabel.value = "Start Inspection"
+                _inspectionLabel.value = idleLabel()
                 _inspectionEnabled.value = true
                 return@launch
             }
@@ -149,7 +186,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             session.endSession()
             agentRunning = false
-            _inspectionLabel.value = "Start Inspection"
+            _inspectionLabel.value = idleLabel()
             _status.value = "Inspection ended — glasses disconnected."
             _inspectionEnabled.value = true
         }
@@ -158,16 +195,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun loadFloorPlan(uri: Uri) {
         viewModelScope.launch {
             val app = getApplication<Application>()
-            val cached = File(app.cacheDir, "floorplan_${System.currentTimeMillis()}.img")
+            val sessionId = _currentSessionId.value
+            if (sessionId.isEmpty()) {
+                _status.value = "Floor plan load failed: no active session."
+                return@launch
+            }
+            // Write through a temp file then let the store archive it into the session dir.
+            val tmp = File(app.cacheDir, "floorplan_${System.currentTimeMillis()}.img")
             try {
                 withContext(Dispatchers.IO) {
                     app.contentResolver.openInputStream(uri)?.use { input ->
-                        cached.outputStream().use { out -> input.copyTo(out) }
+                        tmp.outputStream().use { out -> input.copyTo(out) }
                     } ?: error("cannot open uri")
+                    val archived = store.archiveFloorPlan(sessionId, tmp)
+                    tmp.delete()
+                    session.loadFloorPlan(archived.absolutePath)
                 }
-                session.loadFloorPlan(cached.absolutePath)
                 _status.value = "Floor plan loaded."
             } catch (e: Throwable) {
+                tmp.delete()
                 _status.value = "Floor plan load failed: ${e.message}"
             }
         }
@@ -217,7 +263,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun addManualPin(x: Float, y: Float, label: String = "manual", severity: PinSeverity = PinSeverity.INFO) {
-        session.building.addPin(x, y, label, severity)
+        session.addManualPin(x, y, label, severity)
     }
 
     fun exportPdf() {
@@ -247,7 +293,134 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun clearNotes() {
         session.resetConversation()
         _status.value = "Notes and pins cleared."
+        scheduleSave()
     }
+
+    // region Session management
+
+    fun refreshSessionList() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _sessions.value = store.listSummaries()
+        }
+    }
+
+    fun newInspection() {
+        viewModelScope.launch {
+            if (agentRunning) stopInspectionSuspending()
+            store.flushPendingSave()
+            val snap = store.create()
+            applyLoadedSnapshot(snap)
+            refreshSessionList()
+            _status.value = "Started new inspection."
+        }
+    }
+
+    fun loadSession(id: String) {
+        viewModelScope.launch {
+            if (agentRunning) stopInspectionSuspending()
+            store.flushPendingSave()
+            try {
+                val snap = withContext(Dispatchers.IO) { store.load(id) }
+                applyLoadedSnapshot(snap)
+                refreshSessionList()
+                _status.value = "Loaded ${snap.name}."
+            } catch (t: Throwable) {
+                _status.value = "Load failed: ${t.message}"
+            }
+        }
+    }
+
+    /** Inline sibling of [stopInspection] that the session-switch flow can suspend on. */
+    private suspend fun stopInspectionSuspending() {
+        _inspectionEnabled.value = false
+        _inspectionLabel.value = "Stopping…"
+        session.endSession()
+        agentRunning = false
+        _inspectionLabel.value = idleLabel()
+        _inspectionEnabled.value = true
+    }
+
+    fun deleteSession(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            store.delete(id)
+            // If we deleted the active session, fall back to a fresh one.
+            if (id == _currentSessionId.value) {
+                val snap = store.create()
+                withContext(Dispatchers.Main) { applyLoadedSnapshot(snap) }
+            }
+            _sessions.value = store.listSummaries()
+        }
+    }
+
+    fun renameSession(id: String, newName: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.rename(id, newName) }
+            if (id == _currentSessionId.value) {
+                _currentSessionName.value = newName.trim()
+            }
+            refreshSessionList()
+        }
+    }
+
+    private suspend fun resumeOrCreateSession() {
+        val lastId = prefs.getString(KEY_CURRENT_SESSION, null)
+        val snap = if (lastId != null && store.sessionDir(lastId).isDirectory) {
+            runCatching { withContext(Dispatchers.IO) { store.load(lastId) } }.getOrNull()
+                ?: store.create()
+        } else {
+            store.create()
+        }
+        applyLoadedSnapshot(snap)
+        _status.value = "Ready — tap Start Inspection."
+        refreshSessionList()
+    }
+
+    /** Apply a loaded [SessionSnapshot] to in-memory state. onMutation is detached
+     *  during the swap so the restore itself doesn't trigger a redundant save. */
+    private suspend fun applyLoadedSnapshot(snap: SessionSnapshot) {
+        session.onMutation = null
+        try {
+            session.notes.replaceAll(snap.notes)
+            val floorAbs = snap.floorPlanRelPath?.let {
+                File(store.sessionDir(snap.id), it).absolutePath
+            }
+            session.building.replace(floorAbs, snap.pins)
+            session.restoreConversation(snap.history)
+            session.setSessionPhotosDir(store.photosDir(snap.id).absolutePath)
+
+            _currentSessionId.value = snap.id
+            _currentSessionName.value = snap.name
+            currentCreatedAtMs = snap.createdAtMs
+            prefs.edit().putString(KEY_CURRENT_SESSION, snap.id).apply()
+            if (!agentRunning) _inspectionLabel.value = idleLabel()
+        } finally {
+            session.onMutation = { scheduleSave() }
+        }
+    }
+
+    /** Build a snapshot of the current in-memory state and schedule a debounced save. */
+    private fun scheduleSave() {
+        val id = _currentSessionId.value
+        if (id.isEmpty()) return
+        val floorAbs = session.building.floorPlanPath.value
+        val sessionDirPath = store.sessionDir(id).absolutePath
+        val floorRel = floorAbs?.let {
+            if (it.startsWith(sessionDirPath)) it.removePrefix("$sessionDirPath/") else null
+        }
+        val snap = SessionSnapshot(
+            id = id,
+            name = _currentSessionName.value,
+            createdAtMs = if (currentCreatedAtMs > 0L) currentCreatedAtMs else System.currentTimeMillis(),
+            updatedAtMs = System.currentTimeMillis(),
+            floorPlanRelPath = floorRel,
+            notes = session.notes.notes.value,
+            pins = session.building.pins.value,
+            history = session.historySnapshot(),
+        )
+        store.scheduleSave(snap)
+    }
+
+    // endregion
 
     override fun onCleared() {
         super.onCleared()

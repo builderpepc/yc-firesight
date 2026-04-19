@@ -3,7 +3,9 @@ package com.example.wearableai.shared
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.Serializable
 
+@Serializable
 data class Pin(
     val id: String,
     val x: Float, // normalized 0..1 (left→right)
@@ -13,6 +15,7 @@ data class Pin(
     val noteRef: String? = null, // optional free-text summary shown on tap
 )
 
+@Serializable
 enum class PinSeverity(val key: String) {
     INFO("info"), WARN("warn"), HAZARD("hazard");
 
@@ -53,5 +56,11 @@ class BuildingContext {
         _floorPlanPath.value = null
         _pins.value = emptyList()
         _docsIndexedChunks.value = 0
+    }
+
+    /** Session restore: swap pins + floor plan without touching docsIndexed (app-wide). */
+    fun replace(floorPlan: String?, pins: List<Pin>) {
+        _floorPlanPath.value = floorPlan
+        _pins.value = pins
     }
 }

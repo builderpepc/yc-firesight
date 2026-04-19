@@ -17,5 +17,9 @@ expect class CameraCapture() {
     /** Blocks until a photo is captured or [timeoutMs] elapses. Returns the JPEG path or null. */
     suspend fun capture(timeoutMs: Long = 3000): String?
 
+    /** Directs [capture] to write photos into [dir]. Null (default) falls back to the
+     *  cache directory. Called by the session layer whenever the active session changes. */
+    fun setOutputDir(dir: String?)
+
     fun close()
 }

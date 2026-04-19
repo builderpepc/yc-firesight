@@ -7,6 +7,17 @@
     android:fitsSystemWindows="true"
     android:padding="12dp">
 
+    <TextView
+        android:id="@+id/tvSessionName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="11sp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:alpha="0.75"
+        android:gravity="center"
+        android:layout_marginBottom="4dp" />
+
     <Button
         android:id="@+id/btnInspection"
         android:layout_width="match_parent"
@@ -65,10 +76,20 @@
             android:layout_width="0dp"
             android:layout_height="48dp"
             android:layout_weight="1"
-            android:layout_marginStart="4dp"
+            android:layout_marginHorizontal="4dp"
             android:src="@drawable/ic_tabler_file_pdf"
             android:scaleType="centerInside"
             android:contentDescription="Export PDF" />
+
+        <ImageButton
+            android:id="@+id/btnSessions"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:src="@drawable/ic_tabler_folders"
+            android:scaleType="centerInside"
+            android:contentDescription="Inspections" />
     </LinearLayout>
 
     <CheckBox
@@ -129,11 +150,47 @@
             android:textIsSelectable="true" />
     </ScrollView>
 
+    <!-- Collapsible "Floor Plan" section. Header is always visible at the bottom;
+         the ComposeView toggles GONE/VISIBLE so the notes scroll reclaims space. -->
+    <LinearLayout
+        android:id="@+id/floorPlanHeader"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#22000000"
+        android:padding="8dp"
+        android:layout_marginTop="6dp"
+        android:clickable="true"
+        android:focusable="true">
+
+        <ImageView
+            android:id="@+id/ivFloorPlanChevron"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:src="@drawable/ic_tabler_chevron_down"
+            android:contentDescription="Toggle floor plan" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Floor Plan"
+            android:textStyle="bold"
+            android:textSize="13sp"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
+
     <androidx.compose.ui.platform.ComposeView
         android:id="@+id/floorPlanCompose"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1.5"
-        android:layout_marginTop="8dp" />
+        android:layout_weight="1.5" />
+
+    <!-- Hosts the sessions modal bottom sheet; height=0 since it renders outside layout flow. -->
+    <androidx.compose.ui.platform.ComposeView
+        android:id="@+id/sessionsSheetCompose"
+        android:layout_width="match_parent"
+        android:layout_height="0dp" />
 
 </LinearLayout>

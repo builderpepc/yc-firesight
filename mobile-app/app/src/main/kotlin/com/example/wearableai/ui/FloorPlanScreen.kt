@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -77,6 +78,8 @@ fun FloorPlanScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 240.dp)
+                .weight(1f)
                 .background(Color(0x11000000))
                 .onSizeChanged { viewSize = it }
                 .pointerInput(floorPlanPath) {

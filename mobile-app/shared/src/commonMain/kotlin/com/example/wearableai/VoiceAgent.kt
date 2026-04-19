@@ -94,6 +94,16 @@ class VoiceAgent(private val cloudFallback: CloudFallback) {
 
     fun resetConversation() = history.clear()
 
+    /** Snapshot for session persistence. Safe to call off-turn; readers get a copy. */
+    fun historySnapshot(): List<Map<String, String>> = history.toList()
+
+    /** Replace conversation history from a loaded session. Gated on [turnMutex]
+     *  so a mid-flight turn can't race with the swap. */
+    suspend fun restoreConversation(saved: List<Map<String, String>>) = turnMutex.withLock {
+        history.clear()
+        history.addAll(saved)
+    }
+
     fun release() {
         if (modelHandle != 0L) {
             cactusDestroy(modelHandle)
