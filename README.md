@@ -1,5 +1,5 @@
 # FireSight
-*Voice automation for fire department pre-incident inspections* - [Video](https://www.youtube.com/watch?v=-jg3ZX8wHtI)
+*Voice automation for fire department pre-incident inspections* - [Video](https://www.youtube.com/watch?v=-jg3ZX8wHtI) <br>
 Submission for [Cactus AI and Google Deepmind's Voice Agent Hackathon at Y Combinator](https://github.com/cactus-compute/voice-agents-hack) by [Ethel Zhang](https://www.linkedin.com/in/ethel-shiqi-zhang/), [Troy Gunawardene](https://www.linkedin.com/in/troy-gwdn/), [Ifeoluwa Oyetimehin](https://www.linkedin.com/in/ifeoluwa-oyetimehin/), and [Arjun Chidambaram](https://www.linkedin.com/in/arjunchidambaram/).
 
 ## The Problem We Solve
